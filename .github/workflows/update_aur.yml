@@ -1,0 +1,86 @@
+name: "Periodically update nvim.lazy AUR package"
+
+on:
+  push:
+  schedule:
+    - cron: "* */12 * * *"
+
+jobs:
+  compare-pkgver:
+    runs-on: ubuntu-latest
+    outputs:
+      latest-pkgver: ${{ steps.latest-pkgver.outputs.pkgver }}
+      current-pkgver: ${{ steps.current-pkgver.outputs.pkgver }}
+    steps:
+      - name: Checkout nvim.lazy latest releases
+        id: latest-pkgver
+        run: |
+          pkgver=$(curl -H "Accept:application/vnd.github+json" https://api.github.com/repos/folke/lazy.nvim/releases/latest |
+          grep -Po '(?<="tag_name": ").*?[^\\](?=",)')
+          echo "pkgver=${pkgver}" >> "$GITHUB_OUTPUT"
+
+      - name: Check latest AUR pkgver
+        id: current-pkgver
+        run: |
+          git clone https://aur.archlinux.org/nvim-lazy.git
+          pkgver=$(sed -n -e 's/^\s*pkgver = //p' nvim-lazy/.SRCINFO)
+          echo "pkgver=${pkgver}" >> "$GITHUB_OUTPUT"
+
+  update-aur:
+    runs-on: ubuntu-latest
+    needs: compare-pkgver
+    if: ${{ needs.compare-pkgver.outputs.latest-pkgver != needs.compare-pkgver.outputs.current-pkgver }}
+    env:
+      LATEST_PKGVER: ${{ needs.compare-pkgver.outputs.latest-pkgver }}
+
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+
+      - name: Replace PKGBUILD with latest pkgver
+        run: |
+          sed -i 's\pkgver=.*\pkgver='"$LATEST_PKGVER"'\' nvim-lazy/PKGBUILD
+          cat nvim-lazy/PKGBUILD
+
+      - name: Make package
+        id: makepkg
+        uses: pmphan/pkgbuild-action@master
+        with:
+          path: nvim-lazy
+
+      - name: Sanitize package path
+        id: sanitize-path
+        run: |
+          oldpath=${{ steps.makepkg.outputs.pkgfile }}
+          newpath="$(echo "${oldpath}" | sed -e 's/[^A-Za-z0-9._-]/_/g')"
+          if [[ "${oldpath}" != "${newpath}" ]]; then
+            mv "${oldpath}" "${newpath}"
+          fi
+          echo "pkgfile=$newpath" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: nvim-lazy-${{ env.LATEST_PKGVER }}-${{ github.run_id }}
+          path: ${{ steps.sanitize-path.outputs.pkgfile }}
+
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_KEY }}
+          known_hosts: ${{ secrets.KNOWN_HOSTS }}
+
+      - name: Push update to AUR
+        run: |
+          message="GitHub Action Update nvim-lazy @ ${LATEST_PKGVER}"
+          git clone ssh://aur@aur.archlinux.org/nvim-lazy.git ../aur
+          cp -r nvim-lazy/.  ../aur
+          cd ../aur
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add -A
+          git diff @ --exit-code || ( git commit -m "${message}
+
+          https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" && \
+          echo "::notice::Pushing to AUR: ${message}" )
+          git push

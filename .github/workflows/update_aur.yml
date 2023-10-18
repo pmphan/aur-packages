@@ -3,7 +3,7 @@ name: "Periodically update nvim.lazy AUR package"
 on:
   push:
   schedule:
-    - cron: "* */12 * * *"
+    - cron: "0 */12 * * *"
 
 jobs:
   compare-pkgver:
